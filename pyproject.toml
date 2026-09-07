@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-codex-usage"
+version = "0.1.0"
+description = "Live OpenAI Codex usage and local Hermes history charts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Andrea"}]
+dependencies = []
+
+[project.scripts]
+hermes-codex-usage = "hermes_codex_usage:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["hermes_codex_usage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
