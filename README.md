@@ -130,6 +130,14 @@ The token itself and its fingerprint are never printed.
    reports the token, input, output, cache, reasoning, API-call, session and
    available cost fields stored on `sessions`; records without a model are
    shown as `unknown`.
+   The default seven-day history is a rolling 168-hour window based on each
+   session's `started_at` timestamp, not a fixed set of seven calendar dates.
+   The surviving sessions are then grouped by their local calendar date. As a
+   result, the oldest visible day can be a partial day and can shrink during
+   the day as older sessions fall outside the moving cutoff. For example, a
+   run on 8 September in the morning can include more sessions from 1
+   September than a run later that afternoon. `--today` is different: it
+   selects the current local calendar date.
    **Hermes-codex model usage** — a cumulative model-attributed API-token
    chart. Each day's total bar is segmented by model, with a different colour
    gradient for each model. Metric rows use a shared positional colour sequence
