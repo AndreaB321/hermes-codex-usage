@@ -132,8 +132,9 @@ The token itself and its fingerprint are never printed.
    shown as `unknown`.
    **Hermes-codex model usage** — a cumulative model-attributed API-token
    chart. Each day's total bar is segmented by model, with a different colour
-   gradient for each model. The same gradient is applied to each model name in
-   the metrics summary. The section also reports input, output, cache-read,
+   gradient for each model. Metric rows use a shared positional colour sequence
+   so corresponding rows match visually even when the two accounting sources
+   contain different model sets; the section also reports input, output, cache-read,
    cache-write and reasoning tokens, sessions, API calls and recorded monetary
    costs where available.
 

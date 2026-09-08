@@ -515,6 +515,41 @@ def test_render_chart_shares_model_palette_between_usage_sections():
     assert "\x1b[38;2;34;197;94m" in daily_lines[1]
 
 
+def test_render_chart_shares_metric_row_colours_between_usage_sections():
+    history = [
+        {
+            "day": f"2026-09-0{index}",
+            "tokens": (5 - index) * 100,
+            "sessions": 1,
+            "models": [{"model": f"session-{index}", "tokens": (5 - index) * 100, "sessions": 1}],
+        }
+        for index in range(1, 5)
+    ]
+    model_history = [
+        {
+            "day": f"2026-09-0{index}",
+            "tokens": (5 - index) * 100,
+            "sessions": 1,
+            "models": [{"model": f"model-{index}", "tokens": (5 - index) * 100, "sessions": 1}],
+        }
+        for index in range(1, 5)
+    ]
+
+    chart = cli.render_chart(
+        {"profiles": []},
+        history,
+        color=True,
+        model_history=model_history,
+    )
+    raw_lines = chart.splitlines()
+    visible_lines = [_strip_ansi(line) for line in raw_lines]
+    session_start = visible_lines.index("Session metrics (cumulative for this period)") + 1
+    model_start = visible_lines.index("Model metrics (cumulative for this period)") + 1
+
+    assert raw_lines[session_start + 3].startswith("\x1b[38;2;249;115;22m")
+    assert raw_lines[model_start + 3].startswith("\x1b[38;2;249;115;22m")
+
+
 def test_render_model_chart_uses_cumulative_bars_and_model_segments():
     model_history = [
         {

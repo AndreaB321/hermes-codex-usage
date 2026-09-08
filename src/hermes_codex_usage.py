@@ -937,9 +937,11 @@ def _render_metric_summary(
     color: bool,
     palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
 ) -> list[str]:
-    palettes = palettes or _model_palette_map(history)
     lines = [heading]
-    for model in _sum_model_metrics(history):
+    # Metric rows use their shared position in each section so corresponding
+    # rows remain visually aligned even when the two accounting sources report
+    # different model sets or sort orders.
+    for index, model in enumerate(_sum_model_metrics(history)):
         metrics = [
             f"input {model['input_tokens']:,}",
             f"output {model['output_tokens']:,}",
@@ -954,7 +956,7 @@ def _render_metric_summary(
         if model["actual_cost_usd"] is not None:
             metrics.append(f"actual ${model['actual_cost_usd']:.2f}")
         model_name = _colour_model_name(
-            model["model"], palettes[model["model"]][1], color=color
+            model["model"], _MODEL_PALETTES[index % len(_MODEL_PALETTES)][1], color=color
         )
         lines.append(f"{model_name}: {model['tokens']:,} tokens • " + " • ".join(metrics))
     return lines
