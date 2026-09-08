@@ -481,7 +481,7 @@ def test_render_chart_adds_coloured_session_metrics_after_local_usage():
     local_line = next(line for line in chart.splitlines() if "2026-09-06 |" in line)
     assert "\x1b[38;2;59;130;246m" in local_line  # model-a: blue → cyan
     assert "\x1b[38;2;34;197;94m" in local_line  # model-b: green → yellow
-    assert chart.index("Session metrics") < chart.index("Hermes-codex model usage")
+    assert visible.index("Session metrics") < visible.index("Hermes-codex model usage")
 
 
 def test_render_chart_shares_model_palette_between_usage_sections():
@@ -538,6 +538,13 @@ def test_render_model_chart_uses_cumulative_bars_and_model_segments():
     assert "model-b" in visible
     assert chart.count("\x1b[38;2;") >= 4
     assert "\x1b[38;2;59;130;246mm" in chart
+    title_line = next(
+        line for line in chart.splitlines() if "Hermes-codex model usage" in _strip_ansi(line)
+    )
+    assert title_line.startswith(
+        "\x1b[1m\x1b[48;2;15;23;42m\x1b[38;2;139;92;246mH"
+    )
+    assert "\x1b[38;2;244;114;182m" in title_line
 
 
 def test_codex_chart_puts_percentage_and_reset_details_on_line_after_bar():

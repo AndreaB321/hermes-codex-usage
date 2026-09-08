@@ -968,7 +968,14 @@ def render_model_chart(
     palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
 ) -> str:
     """Render cumulative token bars segmented by model plus useful metrics."""
-    lines = [title or "Hermes-codex model usage (last 7 days; cumulative model-attributed API tokens)"]
+    model_title = title or "Hermes-codex model usage (last 7 days; cumulative model-attributed API tokens)"
+    lines = [
+        _colour_heading(
+            model_title,
+            color=color,
+            palette=((139, 92, 246), (244, 114, 182)),
+        )
+    ]
     if not history:
         lines.append("No Hermes-codex model history")
         return "\n".join(lines)
