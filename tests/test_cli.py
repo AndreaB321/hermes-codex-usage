@@ -248,6 +248,153 @@ def test_load_hermes_history_aggregates_selected_profiles(tmp_path):
     assert history == [{"day": "2024-09-06", "tokens": 154, "sessions": 2}]
 
 
+def test_load_hermes_history_includes_session_model_metrics(tmp_path):
+    home = tmp_path / "default"
+    home.mkdir()
+    connection = sqlite3.connect(home / "state.db")
+    connection.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            started_at REAL NOT NULL,
+            model TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cache_read_tokens INTEGER,
+            cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER,
+            api_call_count INTEGER,
+            estimated_cost_usd REAL,
+            actual_cost_usd REAL
+        );
+        INSERT INTO sessions VALUES
+            ('one', 1725580800, 'model-a', 100, 20, 10, 2, 5, 3, 0.01, NULL),
+            ('two', 1725580800, 'model-b', 30, 4, 6, 1, 2, 1, 0.02, 0.03);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    history = cli.load_hermes_history(
+        [cli.Profile("default", home)],
+        days=7,
+        now=1725667200,
+    )
+
+    assert history == [
+        {
+            "day": "2024-09-06",
+            "tokens": 154,
+            "sessions": 2,
+            "models": [
+                {
+                    "model": "model-a",
+                    "tokens": 120,
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 10,
+                    "cache_write_tokens": 2,
+                    "reasoning_tokens": 5,
+                    "api_calls": 3,
+                    "estimated_cost_usd": 0.01,
+                    "actual_cost_usd": None,
+                    "sessions": 1,
+                },
+                {
+                    "model": "model-b",
+                    "tokens": 34,
+                    "input_tokens": 30,
+                    "output_tokens": 4,
+                    "cache_read_tokens": 6,
+                    "cache_write_tokens": 1,
+                    "reasoning_tokens": 2,
+                    "api_calls": 1,
+                    "estimated_cost_usd": 0.02,
+                    "actual_cost_usd": 0.03,
+                    "sessions": 1,
+                },
+            ],
+        }
+    ]
+
+
+def test_load_hermes_model_history_aggregates_metrics_by_day_and_model(tmp_path):
+    home = tmp_path / "default"
+    home.mkdir()
+    connection = sqlite3.connect(home / "state.db")
+    connection.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            started_at REAL NOT NULL,
+            model TEXT
+        );
+        CREATE TABLE session_model_usage (
+            session_id TEXT,
+            model TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cache_read_tokens INTEGER,
+            cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER,
+            api_call_count INTEGER,
+            estimated_cost_usd REAL,
+            actual_cost_usd REAL
+        );
+        INSERT INTO sessions(id, started_at, model) VALUES
+            ('one', 1725580800, 'model-a'),
+            ('two', 1725580800, 'model-b');
+        INSERT INTO session_model_usage VALUES
+            ('one', 'model-a', 100, 20, 10, 2, 5, 3, 0.01, NULL),
+            ('two', 'model-b', 30, 4, 6, 1, 2, 1, 0.02, 0.03);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    history = cli.load_hermes_model_history(
+        [cli.Profile("default", home)],
+        days=7,
+        now=1725667200,
+    )
+
+    assert history == [
+        {
+            "day": "2024-09-06",
+            "tokens": 154,
+            "sessions": 2,
+            "models": [
+                {
+                    "model": "model-a",
+                    "tokens": 120,
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 10,
+                    "cache_write_tokens": 2,
+                    "reasoning_tokens": 5,
+                    "api_calls": 3,
+                    "estimated_cost_usd": 0.01,
+                    "actual_cost_usd": None,
+                    "sessions": 1,
+                },
+                {
+                    "model": "model-b",
+                    "tokens": 34,
+                    "input_tokens": 30,
+                    "output_tokens": 4,
+                    "cache_read_tokens": 6,
+                    "cache_write_tokens": 1,
+                    "reasoning_tokens": 2,
+                    "api_calls": 1,
+                    "estimated_cost_usd": 0.02,
+                    "actual_cost_usd": 0.03,
+                    "sessions": 1,
+                },
+            ],
+        }
+    ]
+
+
 def test_render_chart_contains_separate_codex_and_hermes_graphs():
     report = {
         "profiles": [
@@ -261,7 +408,18 @@ def test_render_chart_contains_separate_codex_and_hermes_graphs():
         ]
     }
 
-    chart = cli.render_chart(report, [{"day": "2026-09-06", "tokens": 100, "sessions": 1}])
+    chart = cli.render_chart(
+        report,
+        [{"day": "2026-09-06", "tokens": 100, "sessions": 1}],
+        model_history=[
+            {
+                "day": "2026-09-06",
+                "tokens": 80,
+                "sessions": 1,
+                "models": [{"model": "model-a", "tokens": 80, "sessions": 1}],
+            }
+        ],
+    )
 
     assert "Codex rate-limit" in chart
     assert "Weekly" in chart
@@ -271,6 +429,115 @@ def test_render_chart_contains_separate_codex_and_hermes_graphs():
     assert "Hermes-codex local usage" in chart
     assert "2026-09-06" in chart
     assert "100 tokens" in chart
+    assert "Hermes-codex model usage" in chart
+    assert chart.index("Hermes-codex model usage") > chart.index("Hermes-codex local usage")
+
+
+def test_render_chart_adds_coloured_session_metrics_after_local_usage():
+    report = {"profiles": []}
+    history = [
+        {
+            "day": "2026-09-06",
+            "tokens": 154,
+            "sessions": 2,
+            "models": [
+                {
+                    "model": "model-a",
+                    "tokens": 120,
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 10,
+                    "cache_write_tokens": 2,
+                    "reasoning_tokens": 5,
+                    "api_calls": 3,
+                    "estimated_cost_usd": 0.01,
+                    "actual_cost_usd": None,
+                    "sessions": 1,
+                },
+                {
+                    "model": "model-b",
+                    "tokens": 34,
+                    "input_tokens": 30,
+                    "output_tokens": 4,
+                    "cache_read_tokens": 6,
+                    "cache_write_tokens": 1,
+                    "reasoning_tokens": 2,
+                    "api_calls": 1,
+                    "estimated_cost_usd": 0.02,
+                    "actual_cost_usd": 0.03,
+                    "sessions": 1,
+                },
+            ],
+        }
+    ]
+
+    chart = cli.render_chart(report, history, color=True, model_history=[])
+    visible = _strip_ansi(chart)
+
+    assert "Session metrics (cumulative for this period)" in visible
+    assert "model-a: 120 tokens • input 100 • output 20" in visible
+    assert "model-b: 34 tokens • input 30 • output 4" in visible
+    assert "\x1b[38;2;59;130;246mm" in chart
+    local_line = next(line for line in chart.splitlines() if "2026-09-06 |" in line)
+    assert "\x1b[38;2;59;130;246m" in local_line  # model-a: blue → cyan
+    assert "\x1b[38;2;34;197;94m" in local_line  # model-b: green → yellow
+    assert chart.index("Session metrics") < chart.index("Hermes-codex model usage")
+
+
+def test_render_chart_shares_model_palette_between_usage_sections():
+    chart = cli.render_chart(
+        {"profiles": []},
+        [
+            {
+                "day": "2026-09-08",
+                "tokens": 100,
+                "sessions": 1,
+                "models": [{"model": "model-z", "tokens": 100, "sessions": 1}],
+            }
+        ],
+        color=True,
+        model_history=[
+            {
+                "day": "2026-09-08",
+                "tokens": 100,
+                "sessions": 2,
+                "models": [
+                    {"model": "model-a", "tokens": 50, "sessions": 1},
+                    {"model": "model-z", "tokens": 50, "sessions": 1},
+                ],
+            }
+        ],
+    )
+
+    daily_lines = [line for line in chart.splitlines() if "2026-09-08 |" in line]
+    assert len(daily_lines) == 2
+    assert "\x1b[38;2;34;197;94m" in daily_lines[0]  # model-z: green → yellow
+    assert "\x1b[38;2;34;197;94m" in daily_lines[1]
+
+
+def test_render_model_chart_uses_cumulative_bars_and_model_segments():
+    model_history = [
+        {
+            "day": "2026-09-06",
+            "tokens": 120,
+            "sessions": 2,
+            "models": [
+                {"model": "model-a", "tokens": 80, "sessions": 1},
+                {"model": "model-b", "tokens": 40, "sessions": 1},
+            ],
+        }
+    ]
+
+    chart = cli.render_model_chart(model_history, color=True)
+    visible = _strip_ansi(chart)
+
+    assert "Hermes-codex model usage" in visible
+    assert "2026-09-06 |" in visible
+    assert "120 tokens (2 sessions)" in visible
+    assert "model-a" in visible
+    assert "model-b" in visible
+    assert chart.count("\x1b[38;2;") >= 4
+    assert "\x1b[38;2;59;130;246mm" in chart
 
 
 def test_codex_chart_puts_percentage_and_reset_details_on_line_after_bar():
@@ -293,8 +560,9 @@ def test_codex_chart_puts_percentage_and_reset_details_on_line_after_bar():
     chart = cli.render_chart(report, [], color=False)
     lines = chart.splitlines()
 
-    assert lines[1] == "default / Weekly [█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]"
-    assert lines[2] == (
+    bar_index = next(index for index, line in enumerate(lines) if line.startswith("default / Weekly ["))
+    assert lines[bar_index] == "default / Weekly [█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]"
+    assert lines[bar_index + 1] == (
         "  3% used · 97% remaining • resets 2026-09-11 23:13 BST"
     )
 
@@ -346,7 +614,12 @@ def test_chart_titles_are_bold_gradient_text_on_an_explicit_contrasting_backgrou
 def test_chart_titles_have_no_ansi_when_colour_is_disabled():
     chart = cli.render_chart({"profiles": []}, [], color=False)
 
-    assert "Codex rate-limit (live provider snapshot)" in chart
+    assert chart.startswith(
+        "Subscription quota - authoritative provider data\n\n"
+        "Codex rate-limit (live provider snapshot)"
+    )
+    assert "Local Hermes telemetry - not an authoritative subscription usage total." in chart
+    assert chart.index("Codex rate-limit") < chart.index("Local Hermes telemetry")
     assert "Hermes-codex local usage (last 7 days; input + output tokens)" in chart
     assert "\033[" not in chart
 
@@ -381,7 +654,7 @@ def test_chart_defaults_to_colour_even_when_stdout_is_not_a_tty(monkeypatch, cap
             "details": [],
         },
     )
-    monkeypatch.setattr(cli, "load_hermes_history", lambda profiles: [])
+    monkeypatch.setattr(cli, "load_hermes_history", lambda profiles, **_: [])
 
     assert cli.main(["--chart"]) == 0
     assert "\x1b[38;2;" in capsys.readouterr().out

@@ -436,7 +436,7 @@ def load_hermes_history(
             raise ValueError("day must be an ISO calendar date") from exc
     current = datetime.now(timezone.utc).timestamp() if now is None else float(now)
     cutoff = current - (days * 86400)
-    totals: dict[str, dict[str, int]] = {}
+    totals: dict[str, dict[str, Any]] = {}
     for profile in profiles:
         database = profile.home / "state.db"
         if not database.is_file():
@@ -444,37 +444,339 @@ def load_hermes_history(
         try:
             connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
             try:
-                if day is None:
-                    query = """SELECT date(started_at, 'unixepoch', 'localtime') AS day,
-                              COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS tokens,
-                              COUNT(*) AS sessions
-                         FROM sessions
-                        WHERE started_at >= ?
-                        GROUP BY day
-                        ORDER BY day"""
-                    parameters = (cutoff,)
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                session_columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(sessions)")
+                }
+                if "sessions" not in tables or "started_at" not in session_columns:
+                    rows = []
+                elif "model" in session_columns:
+                    connection.row_factory = sqlite3.Row
+                    date_expression = 'date(s."started_at", \'unixepoch\', \'localtime\')'
+                    model_expression = "COALESCE(NULLIF(s.\"model\", ''), 'unknown')"
+                    input_tokens = _model_metric_expression("s", session_columns, "input_tokens")
+                    output_tokens = _model_metric_expression("s", session_columns, "output_tokens")
+                    estimated, estimated_available = _model_cost_expression(
+                        "s", session_columns, "estimated_cost_usd"
+                    )
+                    actual, actual_available = _model_cost_expression(
+                        "s", session_columns, "actual_cost_usd"
+                    )
+                    if day is None:
+                        where = 's."started_at" >= ?'
+                        parameters = (cutoff,)
+                    else:
+                        where = f"{date_expression} = ?"
+                        parameters = (day,)
+                    query = f"""
+                        SELECT
+                            {date_expression} AS day,
+                            {model_expression} AS model,
+                            SUM({input_tokens} + {output_tokens}) AS tokens,
+                            SUM({input_tokens}) AS input_tokens,
+                            SUM({output_tokens}) AS output_tokens,
+                            SUM({_model_metric_expression('s', session_columns, 'cache_read_tokens')}) AS cache_read_tokens,
+                            SUM({_model_metric_expression('s', session_columns, 'cache_write_tokens')}) AS cache_write_tokens,
+                            SUM({_model_metric_expression('s', session_columns, 'reasoning_tokens')}) AS reasoning_tokens,
+                            SUM({_model_metric_expression('s', session_columns, 'api_call_count')}) AS api_calls,
+                            COUNT(*) AS sessions,
+                            SUM({estimated}) AS estimated_cost_usd,
+                            {estimated_available} AS estimated_cost_usd_available,
+                            SUM({actual}) AS actual_cost_usd,
+                            {actual_available} AS actual_cost_usd_available
+                        FROM sessions AS s
+                        WHERE {where}
+                        GROUP BY 1, 2
+                        ORDER BY 1, 2
+                    """
+                    rows = connection.execute(query, parameters).fetchall()
                 else:
-                    query = """SELECT date(started_at, 'unixepoch', 'localtime') AS day,
-                                      COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS tokens,
-                                      COUNT(*) AS sessions
-                                 FROM sessions
-                                WHERE date(started_at, 'unixepoch', 'localtime') = ?
-                                GROUP BY day
-                                ORDER BY day"""
-                    parameters = (day,)
-                rows = connection.execute(query, parameters).fetchall()
+                    if day is None:
+                        query = """SELECT date(started_at, 'unixepoch', 'localtime') AS day,
+                                  COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS tokens,
+                                  COUNT(*) AS sessions
+                             FROM sessions
+                            WHERE started_at >= ?
+                            GROUP BY day
+                            ORDER BY day"""
+                        parameters = (cutoff,)
+                    else:
+                        query = """SELECT date(started_at, 'unixepoch', 'localtime') AS day,
+                                          COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS tokens,
+                                          COUNT(*) AS sessions
+                                     FROM sessions
+                                    WHERE date(started_at, 'unixepoch', 'localtime') = ?
+                                    GROUP BY day
+                                    ORDER BY day"""
+                        parameters = (day,)
+                    rows = connection.execute(query, parameters).fetchall()
             finally:
                 connection.close()
         except (OSError, sqlite3.Error):
             continue
-        for day, tokens, sessions in rows:
-            item = totals.setdefault(str(day), {"tokens": 0, "sessions": 0})
-            item["tokens"] += int(tokens or 0)
-            item["sessions"] += int(sessions or 0)
-    return [
-        {"day": day, **totals[day]}
-        for day in sorted(totals)
-    ]
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                day_name = str(row["day"])
+                item = totals.setdefault(
+                    day_name,
+                    {"day": day_name, "tokens": 0, "sessions": 0, "_models": {}},
+                )
+                item["tokens"] += int(row["tokens"] or 0)
+                item["sessions"] += int(row["sessions"] or 0)
+                model_name = str(row["model"])
+                model = item["_models"].setdefault(
+                    model_name,
+                    {
+                        "model": model_name,
+                        "tokens": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "api_calls": 0,
+                        "sessions": 0,
+                        "estimated_cost_usd": None,
+                        "actual_cost_usd": None,
+                    },
+                )
+                _merge_model_metric(model, row)
+            else:
+                day_name, tokens, sessions = row
+                item = totals.setdefault(
+                    str(day_name),
+                    {"day": str(day_name), "tokens": 0, "sessions": 0},
+                )
+                item["tokens"] += int(tokens or 0)
+                item["sessions"] += int(sessions or 0)
+    history = []
+    for day_name in sorted(totals):
+        item = totals[day_name]
+        models = item.pop("_models", None)
+        if models:
+            item["models"] = sorted(models.values(), key=lambda value: (-value["tokens"], value["model"]))
+        history.append(item)
+    return history
+
+
+def _model_metric_expression(alias: str, columns: set[str], name: str) -> str:
+    if name in columns:
+        return f'COALESCE({alias}."{name}", 0)'
+    return "0"
+
+
+def _model_cost_expression(alias: str, columns: set[str], name: str) -> tuple[str, str]:
+    if name in columns:
+        value = f'COALESCE({alias}."{name}", 0)'
+        available = f'MAX(CASE WHEN {alias}."{name}" IS NOT NULL THEN 1 ELSE 0 END)'
+        return value, available
+    return "0", "0"
+
+
+def _merge_model_metric(target: dict[str, Any], row: sqlite3.Row) -> None:
+    for field in (
+        "tokens",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "api_calls",
+        "sessions",
+    ):
+        target[field] = target.get(field, 0) + int(row[field] or 0)
+    for field in ("estimated_cost_usd", "actual_cost_usd"):
+        if row[f"{field}_available"] and float(row[field] or 0.0) != 0.0:
+            target[field] = (target.get(field) or 0.0) + float(row[field])
+
+
+def load_hermes_model_history(
+    profiles: Iterable[Profile],
+    *,
+    days: int = 7,
+    now: float | None = None,
+    day: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read daily token and cost metrics grouped by model from local state."""
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    if day is not None:
+        try:
+            datetime.fromisoformat(day)
+        except ValueError as exc:
+            raise ValueError("day must be an ISO calendar date") from exc
+    current = datetime.now(timezone.utc).timestamp() if now is None else float(now)
+    cutoff = current - (days * 86400)
+    profiles = list(profiles)
+    model_totals: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for profile in profiles:
+        database = profile.home / "state.db"
+        if not database.is_file():
+            continue
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+            connection.row_factory = sqlite3.Row
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            session_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(sessions)")
+            }
+            usage_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(session_model_usage)")
+            }
+            rows: list[sqlite3.Row]
+            if (
+                "session_model_usage" in tables
+                and {"session_id", "model"}.issubset(usage_columns)
+                and "started_at" in session_columns
+            ):
+                estimated, estimated_available = _model_cost_expression(
+                    "u", usage_columns, "estimated_cost_usd"
+                )
+                actual, actual_available = _model_cost_expression(
+                    "u", usage_columns, "actual_cost_usd"
+                )
+                time_expression = 's."started_at"'
+                usage_date = f"date({time_expression}, 'unixepoch', 'localtime')"
+                where = f"{time_expression} >= ?"
+                parameters: tuple[Any, ...] = (cutoff,)
+                if day is not None:
+                    where = f"{usage_date} = ?"
+                    parameters = (day,)
+                input_tokens = _model_metric_expression("u", usage_columns, "input_tokens")
+                output_tokens = _model_metric_expression("u", usage_columns, "output_tokens")
+                session_model = (
+                    'NULLIF(s."model", \'\')' if "model" in session_columns else "NULL"
+                )
+                query = f"""
+                    SELECT
+                        {usage_date} AS day,
+                        COALESCE(NULLIF(u."model", ''), {session_model}, 'unknown') AS model,
+                        SUM({input_tokens} + {output_tokens}) AS tokens,
+                        SUM({input_tokens}) AS input_tokens,
+                        SUM({output_tokens}) AS output_tokens,
+                        SUM({_model_metric_expression('u', usage_columns, 'cache_read_tokens')}) AS cache_read_tokens,
+                        SUM({_model_metric_expression('u', usage_columns, 'cache_write_tokens')}) AS cache_write_tokens,
+                        SUM({_model_metric_expression('u', usage_columns, 'reasoning_tokens')}) AS reasoning_tokens,
+                        SUM({_model_metric_expression('u', usage_columns, 'api_call_count')}) AS api_calls,
+                        COUNT(DISTINCT u."session_id") AS sessions,
+                        SUM({estimated}) AS estimated_cost_usd,
+                        {estimated_available} AS estimated_cost_usd_available,
+                        SUM({actual}) AS actual_cost_usd,
+                        {actual_available} AS actual_cost_usd_available
+                    FROM session_model_usage AS u
+                    LEFT JOIN sessions AS s ON s."id" = u."session_id"
+                    WHERE {where}
+                    GROUP BY 1, 2
+                    ORDER BY 1, 2
+                """
+                rows = connection.execute(query, parameters).fetchall()
+            elif "sessions" in tables and "started_at" in session_columns:
+                estimated, estimated_available = _model_cost_expression(
+                    "s", session_columns, "estimated_cost_usd"
+                )
+                actual, actual_available = _model_cost_expression(
+                    "s", session_columns, "actual_cost_usd"
+                )
+                session_date = "date(s.\"started_at\", 'unixepoch', 'localtime')"
+                where = 's."started_at" >= ?'
+                parameters = (cutoff,)
+                if day is not None:
+                    where = f"{session_date} = ?"
+                    parameters = (day,)
+                model = (
+                    "COALESCE(NULLIF(s.\"model\", ''), 'unknown')"
+                    if "model" in session_columns
+                    else "'unknown'"
+                )
+                input_tokens = _model_metric_expression("s", session_columns, "input_tokens")
+                output_tokens = _model_metric_expression("s", session_columns, "output_tokens")
+                query = f"""
+                    SELECT
+                        {session_date} AS day,
+                        {model} AS model,
+                        SUM({input_tokens} + {output_tokens}) AS tokens,
+                        SUM({input_tokens}) AS input_tokens,
+                        SUM({output_tokens}) AS output_tokens,
+                        SUM({_model_metric_expression('s', session_columns, 'cache_read_tokens')}) AS cache_read_tokens,
+                        SUM({_model_metric_expression('s', session_columns, 'cache_write_tokens')}) AS cache_write_tokens,
+                        SUM({_model_metric_expression('s', session_columns, 'reasoning_tokens')}) AS reasoning_tokens,
+                        SUM({_model_metric_expression('s', session_columns, 'api_call_count')}) AS api_calls,
+                        COUNT(*) AS sessions,
+                        SUM({estimated}) AS estimated_cost_usd,
+                        {estimated_available} AS estimated_cost_usd_available,
+                        SUM({actual}) AS actual_cost_usd,
+                        {actual_available} AS actual_cost_usd_available
+                    FROM sessions AS s
+                    WHERE {where}
+                    GROUP BY 1, 2
+                    ORDER BY 1, 2
+                """
+                rows = connection.execute(query, parameters).fetchall()
+            else:
+                rows = []
+        except (OSError, sqlite3.Error):
+            rows = []
+        finally:
+            if connection is not None:
+                connection.close()
+
+        for row in rows:
+            key = (str(row["day"]), str(row["model"]))
+            metric = model_totals.setdefault(
+                key,
+                {
+                    "model": key[1],
+                    "tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "api_calls": 0,
+                    "sessions": 0,
+                    "estimated_cost_usd": None,
+                    "actual_cost_usd": None,
+                },
+            )
+            _merge_model_metric(metric, row)
+
+    daily_sessions = {
+        item["day"]: item["sessions"]
+        for item in load_hermes_history(profiles, days=days, now=now, day=day)
+    }
+    days_by_name: dict[str, dict[str, Any]] = {}
+    for (day_name, _model), metric in sorted(model_totals.items()):
+        daily = days_by_name.setdefault(
+            day_name,
+            {
+                "day": day_name,
+                "tokens": 0,
+                "sessions": daily_sessions.get(day_name, 0),
+                "models": [],
+            },
+        )
+        daily["tokens"] += metric["tokens"]
+        daily["models"].append(metric)
+    for daily in days_by_name.values():
+        daily["models"].sort(key=lambda item: (-item["tokens"], item["model"]))
+        if not daily["sessions"]:
+            daily["sessions"] = sum(item["sessions"] for item in daily["models"])
+    return [days_by_name[name] for name in sorted(days_by_name)]
 
 
 def _usage_colour(percent: float) -> tuple[int, int, int]:
@@ -527,6 +829,172 @@ def _history_bar(
     return f"{start}{used_chars}\033[0m{remaining_chars}"
 
 
+_MODEL_PALETTES = (
+    ("blue→cyan", ((59, 130, 246), (34, 211, 238))),
+    ("green→yellow", ((34, 197, 94), (250, 204, 21))),
+    ("violet→pink", ((139, 92, 246), (244, 114, 182))),
+    ("orange→red", ((249, 115, 22), (239, 68, 68))),
+    ("teal→lime", ((20, 184, 166), (163, 230, 53))),
+)
+
+
+def _model_palette_map(history: list[dict[str, Any]]) -> dict[str, tuple[str, tuple[tuple[int, int, int], ...]]]:
+    models = sorted(
+        {
+            str(model.get("model", "unknown"))
+            for item in history
+            for model in item.get("models", [])
+        }
+    )
+    return {
+        model: _MODEL_PALETTES[index % len(_MODEL_PALETTES)]
+        for index, model in enumerate(models)
+    }
+
+
+def _model_segment(count: int, palette: tuple[tuple[int, int, int], ...], *, color: bool) -> str:
+    if count <= 0:
+        return ""
+    blocks = "█" * count
+    if not color:
+        return blocks
+    parts: list[str] = []
+    for index, block in enumerate(blocks):
+        red, green, blue = _heading_colour(index, count, palette)
+        parts.append(f"\033[38;2;{red};{green};{blue}m{block}")
+    parts.append("\033[0m")
+    return "".join(parts)
+
+
+def _model_bar(
+    models: list[dict[str, Any]],
+    maximum: int,
+    palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]],
+    *,
+    color: bool,
+    width: int = 40,
+) -> str:
+    total = sum(int(model.get("tokens", 0) or 0) for model in models)
+    if maximum <= 0 or total <= 0:
+        return "░" * width
+    target = round(total / maximum * width)
+    raw_counts = [int(model.get("tokens", 0) or 0) / maximum * width for model in models]
+    counts = [int(raw) for raw in raw_counts]
+    for index in sorted(range(len(counts)), key=lambda item: raw_counts[item] - counts[item], reverse=True):
+        if sum(counts) >= target:
+            break
+        counts[index] += 1
+    segments: list[str] = []
+    for model, count in zip(models, counts):
+        name = str(model.get("model", "unknown"))
+        palette = palettes[name][1]
+        segments.append(_model_segment(count, palette, color=color))
+    return "".join(segments) + ("░" * max(0, width - sum(counts)))
+
+
+def _sum_model_metrics(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    totals: dict[str, dict[str, Any]] = {}
+    for item in history:
+        for model in item.get("models", []):
+            name = str(model.get("model", "unknown"))
+            total = totals.setdefault(
+                name,
+                {
+                    "model": name,
+                    "tokens": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "api_calls": 0,
+                    "sessions": 0,
+                    "estimated_cost_usd": None,
+                    "actual_cost_usd": None,
+                },
+            )
+            for field in (
+                "tokens",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "api_calls",
+                "sessions",
+            ):
+                total[field] += int(model.get(field, 0) or 0)
+            for field in ("estimated_cost_usd", "actual_cost_usd"):
+                if model.get(field) is not None:
+                    total[field] = (total[field] or 0.0) + float(model[field])
+    return sorted(totals.values(), key=lambda item: (-item["tokens"], item["model"]))
+
+
+def _render_metric_summary(
+    history: list[dict[str, Any]],
+    *,
+    heading: str,
+    color: bool,
+    palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
+) -> list[str]:
+    palettes = palettes or _model_palette_map(history)
+    lines = [heading]
+    for model in _sum_model_metrics(history):
+        metrics = [
+            f"input {model['input_tokens']:,}",
+            f"output {model['output_tokens']:,}",
+            f"cache read {model['cache_read_tokens']:,}",
+            f"cache write {model['cache_write_tokens']:,}",
+            f"reasoning {model['reasoning_tokens']:,}",
+            f"{model['sessions']} sessions",
+            f"{model['api_calls']} API calls",
+        ]
+        if model["estimated_cost_usd"] is not None:
+            metrics.append(f"estimated ${model['estimated_cost_usd']:.2f}")
+        if model["actual_cost_usd"] is not None:
+            metrics.append(f"actual ${model['actual_cost_usd']:.2f}")
+        model_name = _colour_model_name(
+            model["model"], palettes[model["model"]][1], color=color
+        )
+        lines.append(f"{model_name}: {model['tokens']:,} tokens • " + " • ".join(metrics))
+    return lines
+
+
+def render_model_chart(
+    history: list[dict[str, Any]],
+    *,
+    color: bool = False,
+    title: str | None = None,
+    palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
+) -> str:
+    """Render cumulative token bars segmented by model plus useful metrics."""
+    lines = [title or "Hermes-codex model usage (last 7 days; cumulative model-attributed API tokens)"]
+    if not history:
+        lines.append("No Hermes-codex model history")
+        return "\n".join(lines)
+    palettes = palettes or _model_palette_map(history)
+    lines.append("Model bars use Hermes per-model API accounting; the chart above uses session totals.")
+    maximum = max(int(item.get("tokens", 0) or 0) for item in history) or 1
+    for item in history:
+        tokens = int(item.get("tokens", 0) or 0)
+        sessions = int(item.get("sessions", 0) or 0)
+        lines.append(
+            f"{item['day']} | "
+            f"{_model_bar(item.get('models', []), maximum, palettes, color=color):<40} "
+            f"{tokens:,} tokens ({sessions} sessions)"
+        )
+    lines.append("")
+    lines.extend(
+        _render_metric_summary(
+            history,
+            heading="Model metrics (cumulative for this period)",
+            color=color,
+            palettes=palettes,
+        )
+    )
+    return "\n".join(lines)
+
+
 def _heading_colour(index: int, length: int, palette: tuple[tuple[int, int, int], ...]) -> tuple[int, int, int]:
     """Interpolate a heading colour across a small, terminal-safe palette."""
     if length <= 1:
@@ -537,6 +1005,22 @@ def _heading_colour(index: int, length: int, palette: tuple[tuple[int, int, int]
     local = position * segment_count - segment
     first, second = palette[segment], palette[segment + 1]
     return tuple(round(a + (b - a) * local) for a, b in zip(first, second))
+
+
+def _colour_model_name(
+    text: str,
+    palette: tuple[tuple[int, int, int], ...],
+    *,
+    color: bool,
+) -> str:
+    if not color:
+        return text
+    parts: list[str] = []
+    for index, character in enumerate(text):
+        red, green, blue = _heading_colour(index, len(text), palette)
+        parts.append(f"\033[38;2;{red};{green};{blue}m{character}")
+    parts.append("\033[0m")
+    return "".join(parts)
 
 
 def _colour_heading(text: str, *, color: bool, palette: tuple[tuple[int, int, int], ...]) -> str:
@@ -567,8 +1051,10 @@ def render_chart(
     *,
     color: bool = False,
     history_title: str | None = None,
+    model_history: list[dict[str, Any]] | None = None,
+    model_title: str | None = None,
 ) -> str:
-    """Render separate live Codex and local Hermes-codex ASCII charts."""
+    """Render live Codex, local Hermes and model metric charts."""
     codex_title = _colour_heading(
         "Codex rate-limit (live provider snapshot)",
         color=color,
@@ -579,7 +1065,7 @@ def render_chart(
         color=color,
         palette=((96, 165, 250), (129, 140, 248), (244, 114, 182)),
     )
-    lines = [codex_title]
+    lines = ["Subscription quota - authoritative provider data", "", codex_title]
     rendered_window = False
     for item in report.get("profiles", []):
         profile_label = ", ".join(item.get("profiles", [])) or "profile"
@@ -606,19 +1092,47 @@ def render_chart(
         lines.append("unavailable (no Codex rate-limit window returned)")
 
     lines.append("")
+    lines.append("Local Hermes telemetry - not an authoritative subscription usage total.")
+    lines.append("")
     lines.append(hermes_title)
+    palettes = _model_palette_map(history + (model_history or []))
     if not history:
         lines.append("No Hermes-codex history")
-        return "\n".join(lines)
-    maximum = max(int(item.get("tokens", 0) or 0) for item in history) or 1
-    for item in history:
-        tokens = int(item.get("tokens", 0) or 0)
-        sessions = int(item.get("sessions", 0) or 0)
-        lines.append(
-            f"{item['day']} | "
-            f"{_history_bar(tokens, maximum, color=color):<40} "
-            f"{tokens:,} tokens ({sessions} sessions)"
+    else:
+        maximum = max(int(item.get("tokens", 0) or 0) for item in history) or 1
+        for item in history:
+            tokens = int(item.get("tokens", 0) or 0)
+            sessions = int(item.get("sessions", 0) or 0)
+            if item.get("models"):
+                bar = _model_bar(item["models"], maximum, palettes, color=color)
+            else:
+                bar = _history_bar(tokens, maximum, color=color)
+            lines.append(
+                f"{item['day']} | "
+                f"{bar:<40} "
+                f"{tokens:,} tokens ({sessions} sessions)"
+            )
+
+    if any(item.get("models") for item in history):
+        lines.append("")
+        lines.extend(
+            _render_metric_summary(
+                history,
+                heading="Session metrics (cumulative for this period)",
+                color=color,
+                palettes=palettes,
+            )
         )
+
+    lines.append("")
+    lines.extend(
+        render_model_chart(
+            model_history or [],
+            color=color,
+            title=model_title,
+            palettes=palettes,
+        ).splitlines()
+    )
     return "\n".join(lines)
 
 
@@ -697,18 +1211,31 @@ def main(argv: list[str] | None = None) -> int:
         "profiles": group_items(items),
     }
     selected_day = current_local_day() if args.today else None
-    if args.today:
-        history = load_hermes_history(profiles, day=selected_day)
-    else:
-        history = load_hermes_history(profiles)
-    chart_day_title = (
-        f"Hermes-codex local usage for today ({selected_day})" if selected_day else None
-    )
     full_output = (
         not args.profile
         and period is None
         and not args.json
         and not args.chart
+    )
+    show_charts = args.today or args.chart or full_output
+    if args.today:
+        history = load_hermes_history(profiles, day=selected_day)
+    else:
+        history = load_hermes_history(profiles)
+    model_history = (
+        load_hermes_model_history(profiles, day=selected_day)
+        if args.today
+        else load_hermes_model_history(profiles)
+        if show_charts
+        else []
+    )
+    chart_day_title = (
+        f"Hermes-codex local usage for today ({selected_day})" if selected_day else None
+    )
+    model_day_title = (
+        f"Hermes-codex model usage for today ({selected_day}; cumulative model-attributed API tokens)"
+        if selected_day
+        else None
     )
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=False))
@@ -717,10 +1244,28 @@ def main(argv: list[str] | None = None) -> int:
         # WebUI/pipe that launches this CLI. Keep ANSI colour on by default;
         # --no-color is the explicit machine/logging escape hatch.
         use_color = True if args.color is None else args.color
-        print(render_chart(report, history, color=use_color, history_title=chart_day_title))
+        print(
+            render_chart(
+                report,
+                history,
+                color=use_color,
+                history_title=chart_day_title,
+                model_history=model_history,
+                model_title=model_day_title,
+            )
+        )
     elif args.today or full_output:
         use_color = True if args.color is None else args.color
-        print(render_chart(report, history, color=use_color, history_title=chart_day_title))
+        print(
+            render_chart(
+                report,
+                history,
+                color=use_color,
+                history_title=chart_day_title,
+                model_history=model_history,
+                model_title=model_day_title,
+            )
+        )
     else:
         print(render_text(report))
     return 0 if all(item.get("status") == "ok" for item in items) else 1
