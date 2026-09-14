@@ -468,11 +468,12 @@ def load_hermes_history(
                     actual, actual_available = _model_cost_expression(
                         "s", session_columns, "actual_cost_usd"
                     )
+                    usage_filter = _nonzero_usage_predicate("s", session_columns)
                     if day is None:
-                        where = 's."started_at" >= ?'
+                        where = f's."started_at" >= ? AND {usage_filter}'
                         parameters = (cutoff,)
                     else:
-                        where = f"{date_expression} = ?"
+                        where = f"{date_expression} = ? AND {usage_filter}"
                         parameters = (day,)
                     query = f"""
                         SELECT
@@ -497,23 +498,28 @@ def load_hermes_history(
                     """
                     rows = connection.execute(query, parameters).fetchall()
                 else:
+                    usage_filter = _nonzero_usage_predicate("s", session_columns)
                     if day is None:
-                        query = """SELECT date(started_at, 'unixepoch', 'localtime') AS day,
-                                  COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS tokens,
+                        query = """SELECT date(s.started_at, 'unixepoch', 'localtime') AS day,
+                                  COALESCE(SUM(s.input_tokens), 0) + COALESCE(SUM(s.output_tokens), 0) AS tokens,
                                   COUNT(*) AS sessions
-                             FROM sessions
-                            WHERE started_at >= ?
+                             FROM sessions AS s
+                            WHERE s.started_at >= ?
+                              AND {usage_filter}
                             GROUP BY day
                             ORDER BY day"""
+                        query = query.format(usage_filter=usage_filter)
                         parameters = (cutoff,)
                     else:
-                        query = """SELECT date(started_at, 'unixepoch', 'localtime') AS day,
-                                          COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS tokens,
+                        query = """SELECT date(s.started_at, 'unixepoch', 'localtime') AS day,
+                                          COALESCE(SUM(s.input_tokens), 0) + COALESCE(SUM(s.output_tokens), 0) AS tokens,
                                           COUNT(*) AS sessions
-                                     FROM sessions
-                                    WHERE date(started_at, 'unixepoch', 'localtime') = ?
+                                     FROM sessions AS s
+                                    WHERE date(s.started_at, 'unixepoch', 'localtime') = ?
+                                      AND {usage_filter}
                                     GROUP BY day
                                     ORDER BY day"""
+                        query = query.format(usage_filter=usage_filter)
                         parameters = (day,)
                     rows = connection.execute(query, parameters).fetchall()
             finally:
@@ -569,6 +575,26 @@ def _model_metric_expression(alias: str, columns: set[str], name: str) -> str:
     if name in columns:
         return f'COALESCE({alias}."{name}", 0)'
     return "0"
+
+
+def _nonzero_usage_predicate(alias: str, columns: set[str]) -> str:
+    """Return a SQL predicate that excludes rows with no recorded usage."""
+    fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "api_call_count",
+        "estimated_cost_usd",
+        "actual_cost_usd",
+    )
+    predicates = [
+        f'COALESCE({alias}."{field}", 0) <> 0'
+        for field in fields
+        if field in columns
+    ]
+    return "(" + " OR ".join(predicates) + ")" if predicates else "1 = 1"
 
 
 def _model_cost_expression(alias: str, columns: set[str], name: str) -> tuple[str, str]:
@@ -650,12 +676,26 @@ def load_hermes_model_history(
                 actual, actual_available = _model_cost_expression(
                     "u", usage_columns, "actual_cost_usd"
                 )
-                time_expression = 's."started_at"'
+                # A session can remain alive while its active model changes.  The
+                # per-model row is updated on every accounted call, so prefer its
+                # activity timestamp over the session creation time; otherwise a
+                # model first used in an older session disappears from the rolling
+                # history as soon as that session falls outside the window.
+                if "last_seen" in usage_columns:
+                    first_seen = 'u."first_seen"' if "first_seen" in usage_columns else "NULL"
+                    time_expression = (
+                        f'COALESCE(u."last_seen", {first_seen}, s."started_at")'
+                    )
+                elif "first_seen" in usage_columns:
+                    time_expression = 'COALESCE(u."first_seen", s."started_at")'
+                else:
+                    time_expression = 's."started_at"'
                 usage_date = f"date({time_expression}, 'unixepoch', 'localtime')"
-                where = f"{time_expression} >= ?"
+                usage_filter = _nonzero_usage_predicate("u", usage_columns)
+                where = f"{time_expression} >= ? AND {usage_filter}"
                 parameters: tuple[Any, ...] = (cutoff,)
                 if day is not None:
-                    where = f"{usage_date} = ?"
+                    where = f"{usage_date} = ? AND {usage_filter}"
                     parameters = (day,)
                 input_tokens = _model_metric_expression("u", usage_columns, "input_tokens")
                 output_tokens = _model_metric_expression("u", usage_columns, "output_tokens")
@@ -692,11 +732,12 @@ def load_hermes_model_history(
                 actual, actual_available = _model_cost_expression(
                     "s", session_columns, "actual_cost_usd"
                 )
+                usage_filter = _nonzero_usage_predicate("s", session_columns)
                 session_date = "date(s.\"started_at\", 'unixepoch', 'localtime')"
-                where = 's."started_at" >= ?'
+                where = f's."started_at" >= ? AND {usage_filter}'
                 parameters = (cutoff,)
                 if day is not None:
-                    where = f"{session_date} = ?"
+                    where = f"{session_date} = ? AND {usage_filter}"
                     parameters = (day,)
                 model = (
                     "COALESCE(NULLIF(s.\"model\", ''), 'unknown')"
@@ -970,7 +1011,7 @@ def render_model_chart(
     palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
 ) -> str:
     """Render cumulative token bars segmented by model plus useful metrics."""
-    model_title = title or "Hermes-codex model usage (last 7 days; cumulative model-attributed API tokens)"
+    model_title = title or "Hermes model usage (all providers; last 7 days; cumulative model-attributed API tokens)"
     lines = [
         _colour_heading(
             model_title,
@@ -979,7 +1020,7 @@ def render_model_chart(
         )
     ]
     if not history:
-        lines.append("No Hermes-codex model history")
+        lines.append("No Hermes model history")
         return "\n".join(lines)
     palettes = palettes or _model_palette_map(history)
     lines.append("Model bars use Hermes per-model API accounting; the chart above uses session totals.")
@@ -1070,7 +1111,7 @@ def render_chart(
         palette=((34, 211, 238), (96, 165, 250), (167, 139, 250)),
     )
     hermes_title = _colour_heading(
-        history_title or "Hermes-codex local usage (last 7 days; input + output tokens)",
+        history_title or "Hermes local usage (all providers; per session; last 7 days; input + output tokens)",
         color=color,
         palette=((96, 165, 250), (129, 140, 248), (244, 114, 182)),
     )
@@ -1239,10 +1280,12 @@ def main(argv: list[str] | None = None) -> int:
         else []
     )
     chart_day_title = (
-        f"Hermes-codex local usage for today ({selected_day})" if selected_day else None
+        f"Hermes local usage (all providers; per session; today {selected_day}; input + output tokens)"
+        if selected_day
+        else None
     )
     model_day_title = (
-        f"Hermes-codex model usage for today ({selected_day}; cumulative model-attributed API tokens)"
+        f"Hermes model usage for today ({selected_day}; all providers; cumulative model-attributed API tokens)"
         if selected_day
         else None
     )

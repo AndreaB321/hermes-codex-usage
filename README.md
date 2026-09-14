@@ -6,48 +6,17 @@ through Hermes profiles.
 ## See it first
 
 Run `hermes-codex-usage` to see a live Codex rate-limit snapshot alongside the
-local Hermes-codex usage history. Charts are the default output, with colour
-enabled automatically. This representative output uses illustrative data so
-the shape of the charts is clear:
+local Hermes usage history. Charts are the default output, with colour
+enabled automatically. The screenshot below shows a representative captured
+run; local profile names are anonymised for publication:
 
-```text
-Subscription quota - authoritative provider data
+![Example hermes-codex-usage output](docs/hermes-codex-usage-output.png)
 
-[bold cyan → violet on navy] Codex rate-limit (live provider snapshot)
-default / Weekly [█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]
-  3% used · 97% remaining • resets 2026-09-11 23:13 BST
-
-Local Hermes telemetry - not an authoritative subscription usage total.
-
-[bold blue → pink on navy] Hermes-codex local usage (last 7 days; input + output tokens)
-2026-09-01 | ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 6,483,373 tokens (7 sessions)
-2026-09-02 | ███████████████░░░░░░░░░░░░░░░░░░░░░░░ 15,983,696 tokens (10 sessions)
-2026-09-03 | █████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 9,174,220 tokens (6 sessions)
-2026-09-04 | ████████████████████░░░░░░░░░░░░░░░░░░░░ 21,604,885 tokens (13 sessions)
-2026-09-05 | ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 12,738,441 tokens (8 sessions)
-2026-09-06 | ████████████████████████████████████████ 42,579,780 tokens (16 sessions)
-2026-09-07 | ██████████████████████████░░░░░░░░░░░░░░ 27,318,904 tokens (11 sessions)
-
-Session metrics (cumulative for this period)
-model-a: 54,000 tokens • input 45,000 • output 9,000 • cache read 24,000 • cache write 0 • reasoning 4,000 • 20 sessions • 120 API calls
-model-b: 16,000 tokens • input 12,000 • output 4,000 • cache read 7,000 • cache write 0 • reasoning 1,000 • 7 sessions • 32 API calls
-
-[bold violet → pink on navy] Hermes-codex model usage (cumulative model-attributed API tokens)
-Model bars use Hermes per-model API accounting; the chart above uses session totals.
-2026-09-06 | ████████████████████████████████████████ 34,000 tokens (16 sessions)
-2026-09-07 | ██████████████████████████░░░░░░░░░░░░░░ 22,000 tokens (11 sessions)
-
-Model metrics (cumulative for this period)
-model-a: 42,000 tokens • input 35,000 • output 7,000 • cache read 18,000 • cache write 0 • reasoning 3,000 • 20 sessions • 120 API calls
-model-b: 14,000 tokens • input 11,000 • output 3,000 • cache read 6,000 • cache write 0 • reasoning 1,000 • 7 sessions • 32 API calls
-```
-
-The headings are shown with symbolic markers because GitHub does not render
-ANSI escape colours inside Markdown; the command emits the real bold,
-gradient ANSI sequences. The Codex percentage and reset information appear on
-the line immediately after the bar. Because this is a direct CLI report, it
-does not invoke an LLM to compose an answer or consume model tokens, unlike
-asking a skill to generate the same report.
+The screenshot captures the command's real bold and gradient ANSI output in a
+terminal-style image. The Codex percentage and reset information appear on the
+line immediately after the bar. Because this is a direct CLI report, it does
+not invoke an LLM to compose an answer or consume model tokens, unlike asking
+a skill to generate the same report.
 
 ## Requirements and installation
 
@@ -121,7 +90,8 @@ The token itself and its fingerprint are never printed.
    bar.
 2. **Local Hermes telemetry** — local Hermes accounting, not the Codex
    subscription quota. It contains two subsections:
-   **Hermes-codex local usage** — a historical volume chart, with one
+   **Hermes local usage** — a historical volume chart covering all providers,
+   aggregated per session, with one
    proportional bar per day for `input_tokens + output_tokens`. It uses a
    model-segmented bar when `sessions.model` is available, using the same
    per-model colour convention as the model-usage section. It falls back to a
@@ -138,8 +108,8 @@ The token itself and its fingerprint are never printed.
    run on 8 September in the morning can include more sessions from 1
    September than a run later that afternoon. `--today` is different: it
    selects the current local calendar date.
-   **Hermes-codex model usage** — a cumulative model-attributed API-token
-   chart. Each day's total bar is segmented by model, with a different colour
+   **Hermes model usage** — a cumulative model-attributed API-token chart
+   covering all providers. Each day's total bar is segmented by model, with a different colour
    gradient for each model. Metric rows use a shared positional colour sequence
    so corresponding rows match visually even when the two accounting sources
    contain different model sets; the section also reports input, output, cache-read,
@@ -158,14 +128,15 @@ accounting. Model-attributed API totals can differ from session totals because
 Hermes records those aggregates through different accounting paths. The Codex
 chart is not a retroactive quota history.
 
-Model attribution depends on what Hermes writes to `sessions.model` and
-`session_model_usage.model`. If the active model changes during an existing
-session but Hermes does not update those fields for the subsequent API calls,
-`hermes-codex-usage` cannot infer the change afterwards. Those tokens remain
-attributed to the model recorded by Hermes (or to `unknown`) and the new model
-will not appear in the local or model metrics for that period. The CLI only
-displays model attribution present in the local Hermes databases; it does not
-invent or redistribute attribution from the aggregate token totals.
+Model attribution has two sources. `Session metrics` is grouped by the single
+model recorded in `sessions.model`; Hermes keeps that value as the session's
+initial route, so it can remain unchanged after a mid-session `/model` switch.
+`Model metrics` uses the per-call `session_model_usage.model` rows instead and
+uses their latest activity timestamp when selecting the rolling window, so a
+model used recently in a long-lived session is not silently omitted. The
+per-model rows are cumulative counters, so a row that spans the window can
+include usage from before its first visible activity; the CLI does not invent
+or redistribute attribution that Hermes did not persist.
 
 The executable is installed at `~/.local/bin/hermes-codex-usage`.
 
