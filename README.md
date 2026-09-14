@@ -1,7 +1,6 @@
 # hermes-codex-usage
 
-A standalone, manually-run CLI for the live OpenAI Codex account limits available
-through Hermes profiles.
+A standalone, manually-run CLI for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that reports live OpenAI Codex account limits and local multi-provider usage history.
 
 ## See it first
 
