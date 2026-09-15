@@ -83,10 +83,9 @@ The token itself and its fingerprint are never printed.
 `Local Hermes telemetry - not an authoritative subscription usage total.`
 
 1. **Codex rate-limit** — a percentage meter for each provider window. The
-   used portion changes smoothly from green through yellow and orange to red
-   as the quota is consumed; the remainder is shown in the same bar. The
-   percentage and reset details are printed on the line immediately below the
-   bar.
+   whole bar changes smoothly from green at 0% through yellow and orange to red
+   at 100% as the quota is consumed. The percentage and reset details are
+   printed on the line immediately below the bar.
 2. **Local Hermes telemetry** — local Hermes accounting, not the Codex
    subscription quota. It contains two subsections:
    **Hermes local usage** — a historical volume chart covering all providers,
@@ -95,10 +94,13 @@ The token itself and its fingerprint are never printed.
    model-segmented bar when `sessions.model` is available, using the same
    per-model colour convention as the model-usage section. It falls back to a
    blue-to-cyan volume bar when model data is unavailable. The session count is
-   shown beside each bar. A `Session metrics` summary follows the chart and
-   reports the token, input, output, cache, reasoning, API-call, session and
-   available cost fields stored on `sessions`; records without a model are
-   shown as `unknown`.
+   shown beside each bar as right-aligned, self-labelled `tokens` and `sessions`
+   fields, without an extra header row. A `Session metrics` summary follows the
+   chart and reports the token, input, output, cache, reasoning, API-call, session
+   and available cost fields stored on `sessions`; records without a model are
+   shown as `unknown`. Both `Session metrics` and `Model metrics` use aligned
+   tables with one model per row and a dedicated column for each field, ordered
+   by total tokens from largest to smallest.
    The default seven-day history is a rolling 168-hour window based on each
    session's `started_at` timestamp, not a fixed set of seven calendar dates.
    The surviving sessions are then grouped by their local calendar date. As a

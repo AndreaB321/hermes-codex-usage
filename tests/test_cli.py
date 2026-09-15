@@ -554,17 +554,25 @@ def test_render_chart_adds_coloured_session_metrics_after_local_usage():
         }
     ]
 
-    chart = cli.render_chart(report, history, color=True, model_history=[])
+    chart = cli.render_chart(report, history, color=True, model_history=history)
     visible = _strip_ansi(chart)
 
     assert "Session metrics (cumulative for this period)" in visible
-    assert "model-a: 120 tokens • input 100 • output 20" in visible
-    assert "model-b: 34 tokens • input 30 • output 4" in visible
+    assert "Model metrics (cumulative for this period)" in visible
+    assert "Model   | Tokens | Input | Output | Cache read | Cache write | Reasoning | Sessions | API calls | Estimated | Actual" in visible
+    assert "model-a |    120 |   100 |     20 |         10 |           2 |         5 |        1 |         3 |     $0.01 |      -" in visible
+    assert "model-b |     34 |    30 |      4 |          6 |           1 |         2 |        1 |         1 |     $0.02 |  $0.03" in visible
     assert "\x1b[38;2;59;130;246mm" in chart
     local_line = next(line for line in chart.splitlines() if "2026-09-06 |" in line)
     assert "\x1b[38;2;59;130;246m" in local_line  # model-a: blue → cyan
     assert "\x1b[38;2;34;197;94m" in local_line  # model-b: green → yellow
     assert visible.index("Session metrics") < visible.index("Hermes model usage")
+
+    plain = cli.render_chart(report, history, color=False, model_history=history)
+    assert "\x1b[" not in plain
+    assert plain.count("Model   | Tokens | Input | Output | Cache read | Cache write | Reasoning | Sessions | API calls | Estimated | Actual") == 2
+    assert plain.count("model-a |    120 |   100 |     20 |         10 |           2 |         5 |        1 |         3 |     $0.01 |      -") == 2
+    assert plain.count("model-b |     34 |    30 |      4 |          6 |           1 |         2 |        1 |         1 |     $0.02 |  $0.03") == 2
 
 
 def test_render_chart_shares_model_palette_between_usage_sections():
@@ -629,8 +637,62 @@ def test_render_chart_shares_metric_row_colours_between_usage_sections():
     session_start = visible_lines.index("Session metrics (cumulative for this period)") + 1
     model_start = visible_lines.index("Model metrics (cumulative for this period)") + 1
 
-    assert raw_lines[session_start + 3].startswith("\x1b[38;2;249;115;22m")
-    assert raw_lines[model_start + 3].startswith("\x1b[38;2;249;115;22m")
+    assert raw_lines[session_start + 5].startswith("\x1b[38;2;249;115;22m")
+    assert raw_lines[model_start + 5].startswith("\x1b[38;2;249;115;22m")
+
+
+def test_chart_right_aligns_tokens_and_sessions_without_column_headings():
+    history = [
+        {
+            "day": "2026-09-06",
+            "tokens": 9,
+            "sessions": 1,
+            "models": [{"model": "model-a", "tokens": 9, "sessions": 1}],
+        },
+        {
+            "day": "2026-09-07",
+            "tokens": 1234,
+            "sessions": 22,
+            "models": [{"model": "model-a", "tokens": 1234, "sessions": 22}],
+        },
+    ]
+
+    chart = cli.render_chart({"profiles": []}, history, color=False, model_history=history)
+    daily_lines = [line for line in chart.splitlines() if line.startswith("2026-09-")]
+
+    assert len(daily_lines) == 4
+    assert sum(line.endswith("    9 tokens |  1 sessions") for line in daily_lines) == 2
+    assert sum(line.endswith("1,234 tokens | 22 sessions") for line in daily_lines) == 2
+
+
+def test_chart_shares_total_widths_between_session_and_model_histories():
+    history = [
+        {
+            "day": "2026-09-06",
+            "tokens": 9,
+            "sessions": 1,
+            "models": [{"model": "model-a", "tokens": 9, "sessions": 1}],
+        }
+    ]
+    model_history = [
+        {
+            "day": "2026-09-07",
+            "tokens": 1234567,
+            "sessions": 345,
+            "models": [{"model": "model-a", "tokens": 1234567, "sessions": 345}],
+        }
+    ]
+
+    chart = cli.render_chart(
+        {"profiles": []},
+        history,
+        color=False,
+        model_history=model_history,
+    )
+    daily_lines = [line for line in chart.splitlines() if line.startswith("2026-09-")]
+
+    assert daily_lines[0].endswith("       9 tokens |   1 sessions")
+    assert daily_lines[1].endswith("1,234,567 tokens | 345 sessions")
 
 
 def test_render_model_chart_uses_cumulative_bars_and_model_segments():
@@ -651,7 +713,7 @@ def test_render_model_chart_uses_cumulative_bars_and_model_segments():
 
     assert "Hermes model usage" in visible
     assert "2026-09-06 |" in visible
-    assert "120 tokens (2 sessions)" in visible
+    assert "120 tokens | 2 sessions" in visible
     assert "model-a" in visible
     assert "model-b" in visible
     assert chart.count("\x1b[38;2;") >= 4
@@ -713,6 +775,58 @@ def test_render_chart_can_colour_usage_bar_with_green_to_red_gradient():
     assert chart.count("\x1b[0m") >= 2
 
 
+def test_codex_bar_colours_zero_usage_green_and_full_usage_red():
+    empty = cli._codex_bar(0.0, color=True)
+    full = cli._codex_bar(100.0, color=True)
+
+    assert "\x1b[38;2;46;204;113m" in empty
+    assert "\x1b[38;2;231;76;60m" in full
+    assert _strip_ansi(empty) == "░" * 40
+    assert _strip_ansi(full) == "█" * 40
+
+
+def test_session_and_model_metrics_are_sorted_by_total_tokens_descending():
+    history = [
+        {
+            "day": "2026-09-05",
+            "tokens": 100,
+            "sessions": 1,
+            "models": [
+                {"model": "model-small", "tokens": 25, "sessions": 1},
+                {"model": "model-large", "tokens": 75, "sessions": 1},
+            ],
+        },
+        {
+            "day": "2026-09-06",
+            "tokens": 300,
+            "sessions": 1,
+            "models": [
+                {"model": "model-small", "tokens": 100, "sessions": 1},
+                {"model": "model-large", "tokens": 200, "sessions": 1},
+            ],
+        },
+    ]
+
+    chart = cli.render_chart({"profiles": []}, history, model_history=history)
+    visible = _strip_ansi(chart)
+
+    session_start = visible.index("Session metrics (cumulative for this period)")
+    model_start = visible.index("Model metrics (cumulative for this period)")
+    session_section = visible[session_start:model_start]
+    model_section = visible[model_start:]
+
+    for section in (session_section, model_section):
+        metric_rows = [
+            line
+            for line in section.splitlines()
+            if line.startswith(("model-large |", "model-small |"))
+        ]
+        assert metric_rows[0].startswith("model-large |")
+        assert "275" in metric_rows[0]
+        assert metric_rows[1].startswith("model-small |")
+        assert "125" in metric_rows[1]
+
+
 def test_chart_titles_are_bold_gradient_text_on_an_explicit_contrasting_background():
     chart = cli.render_chart(
         {
@@ -761,7 +875,7 @@ def test_render_chart_colours_hermes_history_as_a_volume_chart():
         color=True,
     )
 
-    history_lines = [line for line in chart.splitlines() if "tokens (" in line]
+    history_lines = [line for line in chart.splitlines() if "tokens |" in line]
     assert len(history_lines) == 2
     assert all("\x1b[38;2;" in line for line in history_lines)
     assert "Hermes local usage (all providers; per session; last 7 days; input + output tokens)" in _strip_ansi(chart)

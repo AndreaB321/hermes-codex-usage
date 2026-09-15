@@ -566,7 +566,7 @@ def load_hermes_history(
         item = totals[day_name]
         models = item.pop("_models", None)
         if models:
-            item["models"] = sorted(models.values(), key=lambda value: (-value["tokens"], value["model"]))
+            item["models"] = _sort_metrics_by_tokens(models.values())
         history.append(item)
     return history
 
@@ -814,7 +814,7 @@ def load_hermes_model_history(
         daily["tokens"] += metric["tokens"]
         daily["models"].append(metric)
     for daily in days_by_name.values():
-        daily["models"].sort(key=lambda item: (-item["tokens"], item["model"]))
+        daily["models"] = _sort_metrics_by_tokens(daily["models"])
         if not daily["sessions"]:
             daily["sessions"] = sum(item["sessions"] for item in daily["models"])
     return [days_by_name[name] for name in sorted(days_by_name)]
@@ -837,16 +837,15 @@ def _usage_colour(percent: float) -> tuple[int, int, int]:
 
 
 def _codex_bar(used_percent: float, *, color: bool, width: int = 40) -> str:
-    """Render a single Codex meter; only the used portion receives colour."""
+    """Render a Codex meter coloured by its percentage from green to red."""
     used = max(0.0, min(float(used_percent), 100.0))
     filled = round(used / 100.0 * width)
-    used_chars = "█" * filled
-    remaining_chars = "░" * (width - filled)
-    if not color or not used_chars:
-        return used_chars + remaining_chars
+    bar = ("█" * filled) + ("░" * (width - filled))
+    if not color:
+        return bar
     red, green, blue = _usage_colour(used)
     start = f"\033[38;2;{red};{green};{blue}m"
-    return f"{start}{used_chars}\033[0m{remaining_chars}"
+    return f"{start}{bar}\033[0m"
 
 
 def _history_colour(value: float, maximum: float) -> tuple[int, int, int]:
@@ -933,7 +932,19 @@ def _model_bar(
     return "".join(segments) + ("░" * max(0, width - sum(counts)))
 
 
+def _sort_metrics_by_tokens(metrics: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order metric rows by total tokens, largest first, with a stable tie-break."""
+    return sorted(
+        metrics,
+        key=lambda item: (
+            -int(item.get("tokens", 0) or 0),
+            str(item.get("model", "")),
+        ),
+    )
+
+
 def _sum_model_metrics(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate model rows and return them in descending token order."""
     totals: dict[str, dict[str, Any]] = {}
     for item in history:
         for model in item.get("models", []):
@@ -968,7 +979,7 @@ def _sum_model_metrics(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for field in ("estimated_cost_usd", "actual_cost_usd"):
                 if model.get(field) is not None:
                     total[field] = (total[field] or 0.0) + float(model[field])
-    return sorted(totals.values(), key=lambda item: (-item["tokens"], item["model"]))
+    return _sort_metrics_by_tokens(totals.values())
 
 
 def _render_metric_summary(
@@ -978,29 +989,103 @@ def _render_metric_summary(
     color: bool,
     palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
 ) -> list[str]:
+    models = _sum_model_metrics(history)
     lines = [heading]
-    # Metric rows use their shared position in each section so corresponding
-    # rows remain visually aligned even when the two accounting sources report
-    # different model sets or sort orders.
-    for index, model in enumerate(_sum_model_metrics(history)):
-        metrics = [
-            f"input {model['input_tokens']:,}",
-            f"output {model['output_tokens']:,}",
-            f"cache read {model['cache_read_tokens']:,}",
-            f"cache write {model['cache_write_tokens']:,}",
-            f"reasoning {model['reasoning_tokens']:,}",
-            f"{model['sessions']} sessions",
-            f"{model['api_calls']} API calls",
-        ]
-        if model["estimated_cost_usd"] is not None:
-            metrics.append(f"estimated ${model['estimated_cost_usd']:.2f}")
-        if model["actual_cost_usd"] is not None:
-            metrics.append(f"actual ${model['actual_cost_usd']:.2f}")
-        model_name = _colour_model_name(
-            model["model"], _MODEL_PALETTES[index % len(_MODEL_PALETTES)][1], color=color
+    if not models:
+        return lines
+
+    headers = [
+        "Model",
+        "Tokens",
+        "Input",
+        "Output",
+        "Cache read",
+        "Cache write",
+        "Reasoning",
+        "Sessions",
+        "API calls",
+        "Estimated",
+        "Actual",
+    ]
+    rows: list[list[str]] = []
+    for model in models:
+        rows.append(
+            [
+                str(model["model"]),
+                f"{model['tokens']:,}",
+                f"{model['input_tokens']:,}",
+                f"{model['output_tokens']:,}",
+                f"{model['cache_read_tokens']:,}",
+                f"{model['cache_write_tokens']:,}",
+                f"{model['reasoning_tokens']:,}",
+                f"{model['sessions']:,}",
+                f"{model['api_calls']:,}",
+                (
+                    f"${model['estimated_cost_usd']:.2f}"
+                    if model["estimated_cost_usd"] is not None
+                    else "-"
+                ),
+                (
+                    f"${model['actual_cost_usd']:.2f}"
+                    if model["actual_cost_usd"] is not None
+                    else "-"
+                ),
+            ]
         )
-        lines.append(f"{model_name}: {model['tokens']:,} tokens • " + " • ".join(metrics))
+
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows))
+        for index, header in enumerate(headers)
+    ]
+    separator = "-+-".join("-" * width for width in widths)
+    lines.append(" | ".join(header.ljust(width) for header, width in zip(headers, widths)))
+    lines.append(separator)
+    numeric_columns = set(range(1, len(headers)))
+    for index, (model, row) in enumerate(zip(models, rows)):
+        cells: list[str] = []
+        for column, (value, width) in enumerate(zip(row, widths)):
+            if column == 0:
+                value = _colour_model_name(
+                    value,
+                    _MODEL_PALETTES[index % len(_MODEL_PALETTES)][1],
+                    color=color,
+                ) + (" " * (width - len(row[column])))
+            elif column in numeric_columns:
+                value = value.rjust(width)
+            cells.append(value)
+        lines.append(" | ".join(cells))
     return lines
+
+
+def _chart_totals_widths(
+    *histories: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Return numeric widths for the totals shown beside chart bars."""
+    items = [item for history in histories for item in history]
+    if not items:
+        return 1, 1
+    token_width = max(
+        len(f"{int(item.get('tokens', 0) or 0):,}")
+        for item in items
+    )
+    session_width = max(
+        len(f"{int(item.get('sessions', 0) or 0):,}")
+        for item in items
+    )
+    return token_width, session_width
+
+
+def _format_chart_totals(
+    tokens: int,
+    sessions: int,
+    widths: tuple[int, int],
+) -> str:
+    """Format chart totals as two right-aligned, self-labelled fields."""
+    token_width, session_width = widths
+    return (
+        f"{tokens:>{token_width},} tokens | "
+        f"{sessions:>{session_width},} sessions"
+    )
 
 
 def render_model_chart(
@@ -1009,6 +1094,7 @@ def render_model_chart(
     color: bool = False,
     title: str | None = None,
     palettes: dict[str, tuple[str, tuple[tuple[int, int, int], ...]]] | None = None,
+    totals_widths: tuple[int, int] | None = None,
 ) -> str:
     """Render cumulative token bars segmented by model plus useful metrics."""
     model_title = title or "Hermes model usage (all providers; last 7 days; cumulative model-attributed API tokens)"
@@ -1023,6 +1109,7 @@ def render_model_chart(
         lines.append("No Hermes model history")
         return "\n".join(lines)
     palettes = palettes or _model_palette_map(history)
+    totals_widths = totals_widths or _chart_totals_widths(history)
     lines.append("Model bars use Hermes per-model API accounting; the chart above uses session totals.")
     maximum = max(int(item.get("tokens", 0) or 0) for item in history) or 1
     for item in history:
@@ -1031,7 +1118,7 @@ def render_model_chart(
         lines.append(
             f"{item['day']} | "
             f"{_model_bar(item.get('models', []), maximum, palettes, color=color):<40} "
-            f"{tokens:,} tokens ({sessions} sessions)"
+            f"| {_format_chart_totals(tokens, sessions, totals_widths)}"
         )
     lines.append("")
     lines.extend(
@@ -1145,6 +1232,7 @@ def render_chart(
     lines.append("Local Hermes telemetry - not an authoritative subscription usage total.")
     lines.append("")
     lines.append(hermes_title)
+    totals_widths = _chart_totals_widths(history, model_history or [])
     palettes = _model_palette_map(history + (model_history or []))
     if not history:
         lines.append("No Hermes-codex history")
@@ -1160,7 +1248,7 @@ def render_chart(
             lines.append(
                 f"{item['day']} | "
                 f"{bar:<40} "
-                f"{tokens:,} tokens ({sessions} sessions)"
+                f"| {_format_chart_totals(tokens, sessions, totals_widths)}"
             )
 
     if any(item.get("models") for item in history):
@@ -1181,6 +1269,7 @@ def render_chart(
             color=color,
             title=model_title,
             palettes=palettes,
+            totals_widths=totals_widths,
         ).splitlines()
     )
     return "\n".join(lines)
