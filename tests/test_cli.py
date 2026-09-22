@@ -38,6 +38,10 @@ def test_discover_profiles_returns_default_and_valid_named_profiles(profile_tree
     ]
 
 
+def test_parser_uses_the_codex_command_name():
+    assert cli.build_parser().prog == "hermes-codex-usage"
+
+
 def test_select_profiles_rejects_unknown_profile(profile_tree):
     with pytest.raises(cli.ProfileSelectionError, match="does not exist"):
         cli.select_profiles(cli.discover_profiles(profile_tree), "missing")
@@ -559,9 +563,12 @@ def test_render_chart_adds_coloured_session_metrics_after_local_usage():
 
     assert "Session metrics (cumulative for this period)" in visible
     assert "Model metrics (cumulative for this period)" in visible
-    assert "Model   | Tokens | Input | Output | Cache read | Cache write | Reasoning | Sessions | API calls | Estimated | Actual" in visible
-    assert "model-a |    120 |   100 |     20 |         10 |           2 |         5 |        1 |         3 |     $0.01 |      -" in visible
-    assert "model-b |     34 |    30 |      4 |          6 |           1 |         2 |        1 |         1 |     $0.02 |  $0.03" in visible
+    assert "Model   | Tokens | Input | Output | Cache read | Reasoning | Sessions | API calls" in visible
+    assert "model-a |    120 |   100 |     20 |         10 |         5 |        1 |         3" in visible
+    assert "model-b |     34 |    30 |      4 |          6 |         2 |        1 |         1" in visible
+    assert "Cache write" not in visible
+    assert "Estimated" not in visible
+    assert "Actual" not in visible
     assert "\x1b[38;2;59;130;246mm" in chart
     local_line = next(line for line in chart.splitlines() if "2026-09-06 |" in line)
     assert "\x1b[38;2;59;130;246m" in local_line  # model-a: blue → cyan
@@ -570,9 +577,12 @@ def test_render_chart_adds_coloured_session_metrics_after_local_usage():
 
     plain = cli.render_chart(report, history, color=False, model_history=history)
     assert "\x1b[" not in plain
-    assert plain.count("Model   | Tokens | Input | Output | Cache read | Cache write | Reasoning | Sessions | API calls | Estimated | Actual") == 2
-    assert plain.count("model-a |    120 |   100 |     20 |         10 |           2 |         5 |        1 |         3 |     $0.01 |      -") == 2
-    assert plain.count("model-b |     34 |    30 |      4 |          6 |           1 |         2 |        1 |         1 |     $0.02 |  $0.03") == 2
+    assert plain.count("Model   | Tokens | Input | Output | Cache read | Reasoning | Sessions | API calls") == 2
+    assert plain.count("model-a |    120 |   100 |     20 |         10 |         5 |        1 |         3") == 2
+    assert plain.count("model-b |     34 |    30 |      4 |          6 |         2 |        1 |         1") == 2
+    assert "Cache write" not in plain
+    assert "Estimated" not in plain
+    assert "Actual" not in plain
 
 
 def test_render_chart_shares_model_palette_between_usage_sections():
@@ -639,6 +649,29 @@ def test_render_chart_shares_metric_row_colours_between_usage_sections():
 
     assert raw_lines[session_start + 5].startswith("\x1b[38;2;249;115;22m")
     assert raw_lines[model_start + 5].startswith("\x1b[38;2;249;115;22m")
+
+
+def test_fifth_metric_row_uses_a_palette_distinct_from_the_second_row():
+    history = [
+        {
+            "day": "2026-09-06",
+            "tokens": 1500,
+            "sessions": 5,
+            "models": [
+                {"model": f"model-{index}", "tokens": (6 - index) * 100, "sessions": 1}
+                for index in range(1, 6)
+            ],
+        }
+    ]
+
+    chart = cli.render_chart({"profiles": []}, history, color=True, model_history=history)
+    metric_lines = [line for line in chart.splitlines() if "model-" in _strip_ansi(line)]
+
+    # Row 2 is green→yellow. Row 5 must use the deliberately neutral slate→white
+    # palette rather than the visually similar teal→lime palette.
+    assert metric_lines[1].startswith("\x1b[38;2;34;197;94m")
+    assert metric_lines[4].startswith("\x1b[38;2;148;163;184m")
+    assert not metric_lines[4].startswith("\x1b[38;2;20;184;166m")
 
 
 def test_chart_right_aligns_tokens_and_sessions_without_column_headings():

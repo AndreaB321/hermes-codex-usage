@@ -874,7 +874,7 @@ _MODEL_PALETTES = (
     ("green→yellow", ((34, 197, 94), (250, 204, 21))),
     ("violet→pink", ((139, 92, 246), (244, 114, 182))),
     ("orange→red", ((249, 115, 22), (239, 68, 68))),
-    ("teal→lime", ((20, 184, 166), (163, 230, 53))),
+    ("slate→white", ((148, 163, 184), (248, 250, 252))),
 )
 
 
@@ -1000,12 +1000,9 @@ def _render_metric_summary(
         "Input",
         "Output",
         "Cache read",
-        "Cache write",
         "Reasoning",
         "Sessions",
         "API calls",
-        "Estimated",
-        "Actual",
     ]
     rows: list[list[str]] = []
     for model in models:
@@ -1016,20 +1013,9 @@ def _render_metric_summary(
                 f"{model['input_tokens']:,}",
                 f"{model['output_tokens']:,}",
                 f"{model['cache_read_tokens']:,}",
-                f"{model['cache_write_tokens']:,}",
                 f"{model['reasoning_tokens']:,}",
                 f"{model['sessions']:,}",
                 f"{model['api_calls']:,}",
-                (
-                    f"${model['estimated_cost_usd']:.2f}"
-                    if model["estimated_cost_usd"] is not None
-                    else "-"
-                ),
-                (
-                    f"${model['actual_cost_usd']:.2f}"
-                    if model["actual_cost_usd"] is not None
-                    else "-"
-                ),
             ]
         )
 

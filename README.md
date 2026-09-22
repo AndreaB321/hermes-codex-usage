@@ -96,11 +96,11 @@ The token itself and its fingerprint are never printed.
    blue-to-cyan volume bar when model data is unavailable. The session count is
    shown beside each bar as right-aligned, self-labelled `tokens` and `sessions`
    fields, without an extra header row. A `Session metrics` summary follows the
-   chart and reports the token, input, output, cache, reasoning, API-call, session
-   and available cost fields stored on `sessions`; records without a model are
-   shown as `unknown`. Both `Session metrics` and `Model metrics` use aligned
-   tables with one model per row and a dedicated column for each field, ordered
-   by total tokens from largest to smallest.
+   chart and reports token, input, output, cache-read, reasoning, API-call and
+   session fields stored on `sessions`; records without a model are shown as
+   `unknown`. Both `Session metrics` and `Model metrics` use aligned tables with
+   one model per row and a dedicated column for each displayed field, ordered by
+   total tokens from largest to smallest.
    The default seven-day history is a rolling 168-hour window based on each
    session's `started_at` timestamp, not a fixed set of seven calendar dates.
    The surviving sessions are then grouped by their local calendar date. As a
@@ -113,9 +113,8 @@ The token itself and its fingerprint are never printed.
    covering all providers. Each day's total bar is segmented by model, with a different colour
    gradient for each model. Metric rows use a shared positional colour sequence
    so corresponding rows match visually even when the two accounting sources
-   contain different model sets; the section also reports input, output, cache-read,
-   cache-write and reasoning tokens, sessions, API calls and recorded monetary
-   costs where available.
+   contain different model sets; the section also reports input, output,
+   cache-read and reasoning tokens, sessions and API calls.
 
 Colours are enabled by default for `--chart`, including captured output. Use
 `--no-color` for plain text logs, or `--color` to make the choice explicit.
